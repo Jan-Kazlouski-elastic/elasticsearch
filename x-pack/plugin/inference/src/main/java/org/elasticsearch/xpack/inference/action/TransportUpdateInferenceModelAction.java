@@ -53,13 +53,17 @@ import org.elasticsearch.xpack.inference.registry.ModelRegistry;
 import org.elasticsearch.xpack.inference.services.elasticsearch.ElasticsearchInternalModel;
 import org.elasticsearch.xpack.inference.services.elasticsearch.ElasticsearchInternalService;
 import org.elasticsearch.xpack.inference.services.elasticsearch.ElasticsearchInternalServiceSettings;
+import org.elasticsearch.xpack.inference.services.validation.ModelValidatorBuilder;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.elasticsearch.xpack.inference.services.ServiceUtils.removeFromMapOrDefaultEmpty;
+import static org.elasticsearch.xpack.inference.services.ServiceUtils.removeFromMapOrThrowIfNull;
 import static org.elasticsearch.xpack.inference.services.ServiceUtils.resolveTaskType;
 import static org.elasticsearch.xpack.inference.services.elasticsearch.ElasticsearchInternalServiceSettings.NUM_ALLOCATIONS;
 
@@ -143,15 +147,65 @@ public class TransportUpdateInferenceModelAction extends TransportMasterNodeActi
             })
             .<Boolean>andThen((listener, existingUnparsedModel) -> {
 
+                // existing settings and secrets
+                Map<String, Object> existingSettingsMap = new HashMap<>(existingUnparsedModel.settings());
+                Map<String, Object> existingSecretsMap = new HashMap<>(existingUnparsedModel.secrets());
+
+                // new settings from request
+                Map<String, Object> newTaskSettingsMap = request.getContentAsSettings().taskSettings() != null
+                    ? new HashMap<>(request.getContentAsSettings().taskSettings())
+                    : new HashMap<>();
+                Map<String, Object> newServiceAndSecretSettingsMap = request.getContentAsSettings().serviceSettings() != null
+                    ? new HashMap<>(request.getContentAsSettings().serviceSettings())
+                    : new HashMap<>();
+
+                // separate existing settings
+                Map<String, Object> updatedTaskSettingsMap = new HashMap<>(
+                    removeFromMapOrDefaultEmpty(new HashMap<>(existingSettingsMap), ModelConfigurations.TASK_SETTINGS)
+                );
+                Map<String, Object> updatedSecretSettingsMap = new HashMap<>(
+                    removeFromMapOrDefaultEmpty(new HashMap<>(existingSecretsMap), ModelSecrets.SECRET_SETTINGS)
+                );
+                Map<String, Object> updatedServiceSettingsMap = new HashMap<>(
+                    removeFromMapOrThrowIfNull(new HashMap<>(existingSettingsMap), ModelConfigurations.SERVICE_SETTINGS)
+                );
+
+                // update existing task settings with new task settings
+                updatedTaskSettingsMap.putAll(newTaskSettingsMap);
+                // for secret settings, we replace existing keys with new keys
+                updatedSecretSettingsMap.replaceAll((key, value) -> newServiceAndSecretSettingsMap.remove(key));
+                // add any remaining service settings to service settings map
+                updatedServiceSettingsMap.putAll(newServiceAndSecretSettingsMap);
+
+                // Create and populate updated settings and secrets maps
+                Map<String, Object> updatedSettingsMap = Map.of(
+                    ModelConfigurations.TASK_SETTINGS,
+                    updatedTaskSettingsMap,
+                    ModelConfigurations.SERVICE_SETTINGS,
+                    updatedServiceSettingsMap
+                );
+                Map<String, Object> updatedSecretsMap = Map.of(ModelSecrets.SECRET_SETTINGS, updatedSecretSettingsMap);
+
+                // parse updated model for update
+                Model updatedParsedModel = service.get()
+                    .parsePersistedConfigWithSecrets(
+                        request.getInferenceEntityId(),
+                        resolvedTaskType,
+                        new HashMap<>(updatedSettingsMap),
+                        new HashMap<>(updatedSecretsMap)
+                    );
+
+                // parsed existing model
                 Model existingParsedModel = service.get()
                     .parsePersistedConfigWithSecrets(
                         request.getInferenceEntityId(),
                         existingUnparsedModel.taskType(),
-                        new HashMap<>(existingUnparsedModel.settings()),
-                        new HashMap<>(existingUnparsedModel.secrets())
+                        new HashMap<>(existingSettingsMap),
+                        new HashMap<>(existingSecretsMap)
                     );
 
-                Model newModel = combineExistingModelWithNewSettings(
+                // combined model for updating
+                Model newCombinedModel = combineExistingModelWithNewSettings(
                     existingParsedModel,
                     request.getContentAsSettings(),
                     service.get().name(),
@@ -159,9 +213,13 @@ public class TransportUpdateInferenceModelAction extends TransportMasterNodeActi
                 );
 
                 if (isInClusterService(service.get().name())) {
-                    updateInClusterEndpoint(request, newModel, existingParsedModel, listener);
+                    updateInClusterEndpoint(request, newCombinedModel, existingParsedModel, listener);
                 } else {
-                    modelRegistry.updateModelTransaction(newModel, existingParsedModel, listener);
+                    ActionListener<Model> updateModelListener = listener.delegateFailureAndWrap(
+                        (delegate, verifiedModel) -> modelRegistry.updateModelTransaction(verifiedModel, existingParsedModel, delegate)
+                    );
+                    ModelValidatorBuilder.buildModelValidator(updatedParsedModel.getTaskType(), service.get())
+                        .validate(service.get(), updatedParsedModel, request.masterNodeTimeout(), updateModelListener);
                 }
             })
             .<ModelConfigurations>andThen((listener, didUpdate) -> {
