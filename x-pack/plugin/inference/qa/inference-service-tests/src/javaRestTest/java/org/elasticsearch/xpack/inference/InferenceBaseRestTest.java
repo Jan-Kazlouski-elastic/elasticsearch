@@ -183,6 +183,26 @@ public class InferenceBaseRestTest extends ESRestTestCase {
             """;
     }
 
+    static String mockTextEmbeddingServiceModelConfigWithChunkingSettings() {
+        return """
+            {
+              "service": "text_embedding_test_service",
+              "service_settings": {
+                "model": "my_dense_vector_model",
+                "api_key": "abc64",
+                "dimensions": 246
+              },
+              "task_settings": {
+              },
+              "chunking_settings": {
+                "strategy": "word",
+                "max_chunk_size": 500,
+                "overlap": 2
+              }
+            }
+            """;
+    }
+
     static String mockTextEmbeddingServiceModelConfig(int dimensions) {
         return Strings.format("""
             {

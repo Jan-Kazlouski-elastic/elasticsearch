@@ -552,6 +552,16 @@ public class InferenceCrudIT extends InferenceBaseRestTest {
         assertThat(modelAfterUpdate, is(originalModel));
     }
 
+    public void testUpdateTextEmbeddingEndpointWithChunkingSettings() throws IOException {
+        putModel("text_embedding_model", mockTextEmbeddingServiceModelConfigWithChunkingSettings(), TEXT_EMBEDDING);
+        var originalModel = getModel("text_embedding_model");
+        String updateConfig = updateConfig(TEXT_EMBEDDING, randomAlphaOfLength(1), randomIntBetween(1, 10));
+        var updatedEndpoint = updateEndpoint("text_embedding_model", updateConfig);
+        var modelAfterUpdate = getModel("text_embedding_model");
+        assertThat(modelAfterUpdate.get("chunking_settings"), is(originalModel.get("chunking_settings")));
+        assertThat(updatedEndpoint.get("chunking_settings"), is(originalModel.get("chunking_settings")));
+    }
+
     public void testUpdateRerankEndpointWithFailedValidation() throws IOException {
         putModel("rerank_model", mockRerankServiceModelConfig(), RERANK);
         var originalModel = getModel("rerank_model");
